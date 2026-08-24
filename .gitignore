@@ -1,0 +1,8 @@
+# Generated reports
+reports/
+
+# ZIP packages
+*.zip
+
+# Backup scripts
+*.backup.ps1
