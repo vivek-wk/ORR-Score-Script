@@ -103,7 +103,7 @@ C:\orr\Run-OrrScore.cmd
 
 The launcher first asks whether to run evaluations or review recent scores.
 Reviewing delegates to `Get-OrrScore.ps1`, including its existing output,
-environment, division, lifecycle, and result menus. Running evaluations uses
+current/upcoming score, environment, division, lifecycle, and result menus. Running evaluations uses
 only the BIT ID choice, then queues jobs through
 `POST /api/v4.0/orr/jobs/{BIT_ID}`. Runs ask for a department / division,
 one or more environments, and whether to include only IPM-managed and only
@@ -133,6 +133,17 @@ The default output mode is Table. Available modes are Table, Detailed, and Summa
 ```powershell
 .\Get-OrrScore.ps1 -AllMatching -Environment "Production,Staging" -OutputMode Summary
 ```
+
+To retrieve upcoming scores instead of current scores:
+
+```powershell
+.\Get-OrrScore.ps1 -BitId 041800002285 -ScoreType Upcoming -OutputMode Detailed
+```
+
+Upcoming mode uses preview checkpoints only. Live, exception, and maintenance
+checkpoints are excluded, and the displayed score is calculated from the
+preview checkpoints: all passing checkpoints produce 100%, while any failing
+checkpoint produces a score below 100%.
 
 For non-failing checkpoints:
 
@@ -173,6 +184,7 @@ Table mode exports a table. Detailed and Summary exports contain document-style 
 
 - `-OutputMode Table|Detailed|Summary`
 - `-BitId <letters and numbers>`
+- `-ScoreType Current|Upcoming`
 - `-AllMatching`
 - `-Environment <environment>`
 - `-Division <division>`

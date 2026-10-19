@@ -12,6 +12,10 @@ param(
     [string]$Environment,
 
     [Parameter()]
+    [ValidateSet('Current', 'Upcoming')]
+    [string]$ScoreType,
+
+    [Parameter()]
     [string]$Division,
 
     [Parameter()]
@@ -129,6 +133,67 @@ function Format-Score {
         return $scoreText
     }
     return "$scoreText%"
+}
+
+function Get-UpcomingScore {
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object[]]$Checkpoints
+    )
+
+    if ($null -eq $Checkpoints -or $Checkpoints.Count -eq 0) {
+        return 0
+    }
+
+    $failedCount = @($Checkpoints | Where-Object { $_.status -eq 'FAIL' }).Count
+    return [math]::Round((($Checkpoints.Count - $failedCount) / $Checkpoints.Count) * 100, 2)
+}
+
+function Get-EvaluationScore {
+    param(
+        [Parameter(Mandatory)]
+        $Evaluation,
+
+        [Parameter(Mandatory)]
+        $Detail,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object[]]$FallbackCheckpoints
+    )
+
+    $score = @(
+        $Evaluation.upcomingScore
+        $Evaluation.upcomingEvaluationScore
+        $Detail.upcomingScore
+        $Detail.upcomingEvaluationScore
+        $Detail.score
+    ) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1
+
+    if ($null -ne $score) {
+        return $score
+    }
+    return Get-UpcomingScore -Checkpoints $FallbackCheckpoints
+}
+
+function Get-EvaluationInclusiveScore {
+    param(
+        [Parameter(Mandatory)]
+        $Evaluation,
+
+        [Parameter(Mandatory)]
+        $Detail
+    )
+
+    return @(
+        $Evaluation.upcomingInclusiveScore
+        $Evaluation.upcomingEvaluationInclusiveScore
+        $Detail.upcomingInclusiveScore
+        $Detail.upcomingEvaluationInclusiveScore
+        $Evaluation.inclusiveScore
+        $Detail.inclusiveScore
+    ) | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1
 }
 
 function Read-MenuSelection {
@@ -606,6 +671,11 @@ if ($selectedEnvironments.Count -eq 0 -or @($selectedEnvironments | Where-Object
     throw "Invalid environment '$Environment'. Valid values: $($validEnvironments -join ', ')."
 }
 
+if ([string]::IsNullOrWhiteSpace($ScoreType)) {
+    $ScoreType = Read-MenuSelection -Prompt 'Scores to retrieve' -Options @('Current', 'Upcoming') -Default @('Current')
+}
+$isUpcoming = $ScoreType -eq 'Upcoming'
+
 if (-not $PSBoundParameters.ContainsKey('Division')) {
     $Division = Read-MenuSelection -Prompt 'Division' -Options @('ALL', 'TAA', 'HLT', 'FCC', 'CORP', 'CPESG', 'DXG', 'LNR', 'GBS', 'GGM', 'UNKNOWN') -Default @('ALL')
 }
@@ -625,17 +695,25 @@ if ($AllMatching) {
     }
 }
 
-if (-not $PSBoundParameters.ContainsKey('Live')) {
-    $Live = Read-OptionalBoolean -Prompt 'Show live checkpoints?' -Default $true
+if ($isUpcoming) {
+    $Live = $false
+    $Preview = $true
+    $Exception = $false
+    $Maintenance = $false
 }
-if (-not $PSBoundParameters.ContainsKey('Preview')) {
-    $Preview = Read-OptionalBoolean -Prompt 'Show preview checkpoints?' -Default $true
-}
-if (-not $PSBoundParameters.ContainsKey('Exception')) {
-    $Exception = Read-OptionalBoolean -Prompt 'Show exception checkpoints?' -Default $true
-}
-if (-not $PSBoundParameters.ContainsKey('Maintenance')) {
-    $Maintenance = Read-OptionalBoolean -Prompt 'Show maintenance checkpoints?' -Default $true
+else {
+    if (-not $PSBoundParameters.ContainsKey('Live')) {
+        $Live = Read-OptionalBoolean -Prompt 'Show live checkpoints?' -Default $true
+    }
+    if (-not $PSBoundParameters.ContainsKey('Preview')) {
+        $Preview = Read-OptionalBoolean -Prompt 'Show preview checkpoints?' -Default $true
+    }
+    if (-not $PSBoundParameters.ContainsKey('Exception')) {
+        $Exception = Read-OptionalBoolean -Prompt 'Show exception checkpoints?' -Default $true
+    }
+    if (-not $PSBoundParameters.ContainsKey('Maintenance')) {
+        $Maintenance = Read-OptionalBoolean -Prompt 'Show maintenance checkpoints?' -Default $true
+    }
 }
 if (-not $PSBoundParameters.ContainsKey('Failing')) {
     $failingChoice = Read-MenuSelection -Prompt 'Checkpoints to include' -Options @('Failing checkpoints', 'Non-failing checkpoints', 'All checkpoints') -Default @('Failing checkpoints')
@@ -650,6 +728,7 @@ Write-Host "ORR Score & Checkpoint Report v$scriptVersion" -ForegroundColor Cyan
 Write-Host '----------------------------------' -ForegroundColor DarkCyan
 Write-Field -Label 'Output' -Value $OutputMode
 Write-Field -Label 'Mode' -Value $(if ($AllMatching) { 'Multiple BIT IDs' } else { "Single BIT ID ($BitId)" })
+Write-Field -Label 'Scores' -Value $ScoreType
 Write-Field -Label 'Environment' -Value ($selectedEnvironments -join ', ')
 Write-Field -Label 'Division' -Value $(if ($Division) { $Division } else { 'All' })
 if ($AllMatching) {
@@ -697,6 +776,7 @@ try {
     $queryParameters = [ordered]@{
         environments = $selectedEnvironments -join ','
         latestOnly   = 'true'
+        upcomingOnly = $isUpcoming.ToString().ToLowerInvariant()
         limit        = '100'
         includeCount = 'true'
     }
@@ -732,7 +812,7 @@ try {
         $summaryUrl = "$apiBaseUrl/evaluations?$queryString"
 
         $targetLabel = if ($AllMatching) { 'all matching BIT IDs' } else { $BitId }
-        Write-Host "Loading latest $Environment evaluations for $targetLabel..." -ForegroundColor Cyan
+        Write-Host "Loading $ScoreType $Environment evaluations for $targetLabel..." -ForegroundColor Cyan
         $summary = Invoke-RestMethod -Uri $summaryUrl -Headers $headers -TimeoutSec 60
         foreach ($item in @($summary.items)) {
             $summaries.Add($item)
@@ -766,11 +846,17 @@ try {
             throw "Evaluation '$($latest.id)' returned no checkpoint data."
         }
 
-        $failedCheckpoints = @($detail.checkpoints | Where-Object { $_.status -eq 'FAIL' })
-        $maintenanceCheckpoints = @($detail.checkpoints | Where-Object { $_.metadata.isMaintenance })
-        $scoredCheckpoints = @($detail.checkpoints | Where-Object { $_.metadata.isScored })
+        $scoreCheckpoints = if ($isUpcoming) {
+            @($detail.checkpoints | Where-Object { $_.metadata.unscoredStatusDetails.unscoredType -eq 'preview' })
+        }
+        else {
+            @($detail.checkpoints)
+        }
+        $failedCheckpoints = @($scoreCheckpoints | Where-Object { $_.status -eq 'FAIL' })
+        $maintenanceCheckpoints = @($scoreCheckpoints | Where-Object { $_.metadata.isMaintenance })
+        $scoredCheckpoints = @($scoreCheckpoints | Where-Object { $_.metadata.isScored })
         $matchingCheckpoints = @(
-            $detail.checkpoints | Where-Object {
+            $scoreCheckpoints | Where-Object {
                 $isPreview = $_.metadata.unscoredStatusDetails.unscoredType -eq 'preview'
                 $hasException = [bool]$_.hasException
                 $isMaintenance = [bool]$_.metadata.isMaintenance
@@ -797,9 +883,9 @@ try {
             Environment            = ($latest.environmentNames -join ', ')
             EvaluationId           = $latest.id
             GeneratedAtUtc         = ([datetime]$latest.generatedAt).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
-            OverallScore           = $detail.score
-            InclusiveScore         = $latest.inclusiveScore
-            TotalCheckpoints       = $detail.checkpoints.Count
+            OverallScore           = if ($isUpcoming) { Get-EvaluationScore -Evaluation $latest -Detail $detail -FallbackCheckpoints $scoreCheckpoints } else { $detail.score }
+            InclusiveScore         = if ($isUpcoming) { Get-EvaluationInclusiveScore -Evaluation $latest -Detail $detail } else { $latest.inclusiveScore }
+            TotalCheckpoints       = $scoreCheckpoints.Count
             ScoredCheckpoints      = $scoredCheckpoints.Count
             FailedCheckpointCount  = $failedCheckpoints.Count
             MatchingCheckpointCount = $matchingCheckpoints.Count
@@ -1030,8 +1116,8 @@ try {
         $summaryNumber++
         Write-Host ("[{0}] {1} [{2}]" -f $summaryNumber, $result.Application, $result.BitId) -ForegroundColor Cyan
         Write-Field -Label 'Environment' -Value $result.Environment
-        Write-Field -Label 'Overall score' -Value (Format-Score $result.OverallScore)
-        Write-Field -Label 'Inclusive score' -Value $result.InclusiveScore
+        Write-Field -Label $(if ($isUpcoming) { 'Upcoming score' } else { 'Overall score' }) -Value (Format-Score $result.OverallScore)
+        Write-Field -Label $(if ($isUpcoming) { 'Upcoming inclusive score' } else { 'Inclusive score' }) -Value $result.InclusiveScore
         Write-Field -Label 'Total checkpoints' -Value $result.TotalCheckpoints
         Write-Field -Label 'Scored checkpoints' -Value $result.ScoredCheckpoints
         Write-Field -Label 'Matched checkpoints' -Value $result.MatchingCheckpointCount
@@ -1046,3 +1132,5 @@ catch {
     Write-Error "Unable to retrieve ORR score: $($_.Exception.Message)"
     exit 1
 }
+
+
